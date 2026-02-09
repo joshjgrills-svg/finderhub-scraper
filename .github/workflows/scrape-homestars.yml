@@ -1,0 +1,59 @@
+name: HomeStars Scraper
+
+on:
+  # Run every 6 hours
+  schedule:
+    - cron: '0 */6 * * *'
+  
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      batch_number:
+        description: 'Batch number to scrape (1-50)'
+        required: false
+        default: '1'
+      batch_size:
+        description: 'Number of providers per batch'
+        required: false
+        default: '200'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      # Run 5 batches in parallel (scrape 1,000 providers at once!)
+      matrix:
+        batch: [1, 2, 3, 4, 5]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 lxml
+      
+      - name: Run scraper for batch ${{ matrix.batch }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BATCH_NUMBER: ${{ matrix.batch }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '200' }}
+        run: |
+          python scrape_homestars.py
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: scraper-logs-batch-${{ matrix.batch }}
+          path: |
+            *.log
+            *.json
+          retention-days: 7
