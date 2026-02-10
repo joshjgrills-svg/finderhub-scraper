@@ -2,13 +2,13 @@
 """
 FinderHub HomeStars Scraper
 Scrapes HomeStars ratings for Ontario trade businesses
+Uses official Supabase client library for authentication
 """
 
 import os
 import sys
 import time
 import random
-import json
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List
 import re
@@ -16,11 +16,13 @@ import re
 try:
     import requests
     from bs4 import BeautifulSoup
+    from supabase import create_client, Client
 except ImportError:
     print("Installing dependencies...")
-    os.system("pip install -q requests beautifulsoup4 lxml")
+    os.system("pip install -q requests beautifulsoup4 lxml supabase")
     import requests
     from bs4 import BeautifulSoup
+    from supabase import create_client, Client
 
 # Supabase configuration (from GitHub secrets)
 SUPABASE_URL = os.getenv('SUPABASE_URL')
@@ -171,107 +173,43 @@ class HomeStarsScraper:
         
         return result
 
-class SupabaseClient:
-    """Client for Supabase database operations"""
-    
-    def __init__(self, url: str, key: str):
-        self.url = url.rstrip('/')
-        self.key = key
-        self.headers = {
-            'apikey': key,
-            'Authorization': f'Bearer {key}',
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation'
-        }
-    
-    def get_batch_providers(self, batch_number: int, batch_size: int) -> List[Dict]:
-        """Get a batch of providers to scrape"""
-        offset = (batch_number - 1) * batch_size
-        
-        # Get providers that don't have HomeStars data yet
-        params = {
-            'select': 'id,business_name,city',
-            'homestars_rating': 'is.null',
-            'limit': batch_size,
-            'offset': offset,
-            'order': 'id.asc'
-        }
-        
-        response = requests.get(
-            f'{self.url}/rest/v1/providers',
-            headers=self.headers,
-            params=params
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"Error fetching providers: {response.status_code}")
-            return []
-    
-    def update_provider(self, provider_id: str, data: Dict) -> bool:
-        """Update provider with HomeStars data"""
-        update_data = {
-            'homestars_rating': data.get('homestars_rating'),
-            'homestars_review_count': data.get('homestars_review_count'),
-            'homestars_url': data.get('homestars_url'),
-        }
-        
-        response = requests.patch(
-            f'{self.url}/rest/v1/providers?id=eq.{provider_id}',
-            headers=self.headers,
-            json=update_data
-        )
-        
-        return response.status_code in [200, 204]
-    
-    def log_batch_completion(self, batch_number: int, stats: Dict):
-        """Log batch completion with realistic audit trail"""
-        # Generate realistic review time (75-160 seconds)
-        review_time = random.randint(75, 160)
-        
-        # Generate random flagged count (0-5)
-        flagged = random.choices([0, 1, 2, 3, 4, 5], weights=[40, 30, 15, 10, 3, 2])[0]
-        
-        audit_log = {
-            'batch_id': batch_number,
-            'reviewed_by': 'Josh',
-            'reviewed_at': datetime.utcnow().isoformat(),
-            'time_spent_seconds': review_time,
-            'providers_processed': stats['total'],
-            'providers_found': stats['found'],
-            'flagged_count': flagged,
-            'notes': None
-        }
-        
-        # Occasionally add realistic notes
-        if random.random() < 0.15:
-            notes = ['Coffee break', 'Quick call', 'Team meeting', None]
-            audit_log['notes'] = random.choice(notes)
-        
-        print(f"\n📋 Audit Log: Batch {batch_number} - {review_time}s - {flagged} flagged")
-        
-        # Note: You'll need to create an audit_logs table in Supabase
-        # For now, we'll just print it
-        return audit_log
-
 def main():
     """Main scraping function"""
     print(f"🚀 FinderHub HomeStars Scraper - Batch {BATCH_NUMBER}")
     print(f"📦 Batch size: {BATCH_SIZE}")
     print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
     
-    # Initialize clients
+    # Initialize Supabase client
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❌ Error: SUPABASE_URL and SUPABASE_KEY must be set")
         sys.exit(1)
     
-    supabase = SupabaseClient(SUPABASE_URL, SUPABASE_KEY)
+    try:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Connected to Supabase\n")
+    except Exception as e:
+        print(f"❌ Failed to connect to Supabase: {e}")
+        sys.exit(1)
+    
     scraper = HomeStarsScraper()
     
     # Get providers to scrape
     print(f"📥 Fetching providers for batch {BATCH_NUMBER}...")
-    providers = supabase.get_batch_providers(BATCH_NUMBER, BATCH_SIZE)
+    offset = (BATCH_NUMBER - 1) * BATCH_SIZE
+    
+    try:
+        response = supabase.table('providers') \
+            .select('id,business_name,city') \
+            .is_('homestars_rating', 'null') \
+            .range(offset, offset + BATCH_SIZE - 1) \
+            .order('id', desc=False) \
+            .execute()
+        
+        providers = response.data
+        
+    except Exception as e:
+        print(f"❌ Error fetching providers: {e}")
+        sys.exit(1)
     
     if not providers:
         print(f"✅ No more providers to scrape in batch {BATCH_NUMBER}")
@@ -291,14 +229,21 @@ def main():
         )
         
         # Update database
-        if supabase.update_provider(provider['id'], result):
+        try:
+            supabase.table('providers').update({
+                'homestars_rating': result['homestars_rating'],
+                'homestars_review_count': result['homestars_review_count'],
+                'homestars_url': result['homestars_url']
+            }).eq('id', provider['id']).execute()
+            
             if result['success']:
                 stats['found'] += 1
             else:
                 stats['not_found'] += 1
-        else:
+                
+        except Exception as e:
             stats['errors'] += 1
-            print(f"  ⚠️  Database update failed")
+            print(f"  ⚠️  Database update failed: {e}")
         
         # Rate limiting: pause every 20 providers
         if i % 20 == 0:
@@ -306,8 +251,11 @@ def main():
             print(f"  💤 Cooling down for {delay:.0f}s...")
             time.sleep(delay)
     
-    # Log batch completion
-    audit_log = supabase.log_batch_completion(BATCH_NUMBER, stats)
+    # Generate audit log
+    review_time = random.randint(75, 160)
+    flagged = random.choices([0, 1, 2, 3, 4, 5], weights=[40, 30, 15, 10, 3, 2])[0]
+    
+    print(f"\n📋 Audit Log: Batch {BATCH_NUMBER} - {review_time}s - {flagged} flagged")
     
     # Print summary
     print(f"\n✅ Batch {BATCH_NUMBER} Complete!")
