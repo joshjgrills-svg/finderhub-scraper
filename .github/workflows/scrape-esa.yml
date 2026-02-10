@@ -1,0 +1,45 @@
+name: ESA License Scraper
+
+on:
+  workflow_dispatch:  # Manual trigger only
+  # Run after ratings scraper completes
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        batch: [1, 2]  # 2 batches x 50 = 100 (should cover all electricians)
+      fail-fast: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests
+      
+      - name: Run ESA license scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BATCH_NUMBER: ${{ matrix.batch }}
+          BATCH_SIZE: 50
+        run: |
+          python scrape_esa_licenses.py
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esa-logs-batch-${{ matrix.batch }}
+          path: "*.log"
+          if-no-files-found: ignore
