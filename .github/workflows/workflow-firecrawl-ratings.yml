@@ -1,0 +1,48 @@
+name: Firecrawl Multi-Source Ratings Scraper
+
+on:
+  workflow_dispatch:  # Manual trigger only
+    inputs:
+      batch_number:
+        description: 'Batch number to process'
+        required: true
+        default: '1'
+      batch_size:
+        description: 'Number of providers per batch'
+        required: true
+        default: '100'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests
+      
+      - name: Run Firecrawl ratings scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          BATCH_NUMBER: ${{ github.event.inputs.batch_number }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size }}
+        run: |
+          python scrape_firecrawl_ratings.py
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firecrawl-logs-batch-${{ github.event.inputs.batch_number }}
+          path: "*.log"
+          if-no-files-found: ignore
