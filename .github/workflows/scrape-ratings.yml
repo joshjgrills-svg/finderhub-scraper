@@ -1,0 +1,46 @@
+name: Multi-Source Ratings Scraper
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: '0 0 * * 0'  # Run weekly on Sundays at midnight
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        batch: [1, 2, 3]  # 3 batches x 50 = 150 providers (covers all 115)
+      fail-fast: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests
+      
+      - name: Run multi-source ratings scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BATCH_NUMBER: ${{ matrix.batch }}
+          BATCH_SIZE: 50
+        run: |
+          python scrape_multi_source_ratings.py
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ratings-logs-batch-${{ matrix.batch }}
+          path: "*.log"
+          if-no-files-found: ignore
