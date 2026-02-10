@@ -79,15 +79,12 @@ class FirecrawlScraper:
     
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.base_url = "https://api.firecrawl.dev/v1"
+        self.base_url = "https://api.firecrawl.dev/v2"
     
     def scrape_business_ratings(self, business_name: str, city: str) -> Dict:
         """
-        Scrape ratings from multiple platforms using Firecrawl
+        Scrape ratings from multiple platforms using Firecrawl's Search + LLM Extract
         """
-        # Search for the business across platforms
-        search_query = f"{business_name} {city} reviews"
-        
         results = {
             'yelp_rating': None,
             'yelp_reviews': None,
@@ -100,93 +97,94 @@ class FirecrawlScraper:
             'facebook_reviews': None,
         }
         
-        # Try to scrape each platform
-        platforms = [
-            (f"https://www.yelp.com/search?find_desc={business_name}&find_loc={city}", 'yelp'),
-            (f"https://homestars.com/search?q={business_name}+{city}", 'homestars'),
-            (f"https://www.bbb.org/search?find_text={business_name}+{city}", 'bbb'),
+        # Use Firecrawl's Search feature to find the business across platforms
+        # This is more reliable than scraping search pages
+        search_queries = [
+            f"{business_name} {city} yelp",
+            f"{business_name} {city} homestars",
+            f"{business_name} {city} bbb better business bureau",
         ]
         
-        for url, platform in platforms:
+        for query in search_queries:
             try:
-                # Use Firecrawl's scrape endpoint
+                # Use Firecrawl's search endpoint
                 response = requests.post(
-                    f"{self.base_url}/scrape",
+                    f"{self.base_url}/search",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json"
                     },
                     json={
-                        "url": url,
-                        "formats": ["markdown", "html"],
-                        "onlyMainContent": True,
-                        "timeout": 30000
+                        "query": query,
+                        "limit": 1,  # Just get the top result
+                        "scrapeOptions": {
+                            "formats": [
+                                {
+                                    "type": "json",
+                                    "prompt": f"Extract the rating and number of reviews for {business_name}. Return JSON with: rating (number), review_count (number). If not found, return nulls."
+                                }
+                            ]
+                        }
                     },
                     timeout=60
                 )
                 
                 if response.status_code == 200:
                     data = response.json()
-                    content = data.get('data', {}).get('markdown', '')
                     
-                    # Extract ratings from content
-                    if platform == 'yelp':
-                        results.update(self._extract_yelp_ratings(content, business_name))
-                    elif platform == 'homestars':
-                        results.update(self._extract_homestars_ratings(content, business_name))
-                    elif platform == 'bbb':
-                        results.update(self._extract_bbb_ratings(content, business_name))
+                    # V2 API returns different structure
+                    if data.get('success'):
+                        search_results = data.get('data', {}).get('web', [])
+                        
+                        if search_results and len(search_results) > 0:
+                            result = search_results[0]
+                            
+                            # V2 returns markdown in 'markdown' field if scrapeOptions provided
+                            markdown = result.get('markdown', '')
+                            extracted_json = result.get('json', {})
+                            
+                            # Determine platform from URL
+                            url = result.get('url', '').lower()
+                            
+                            # Try JSON extraction first, fall back to markdown parsing
+                            if extracted_json and extracted_json.get('rating'):
+                                rating = float(extracted_json['rating'])
+                                review_count = int(extracted_json.get('review_count', 0)) if extracted_json.get('review_count') else None
+                                
+                                if 'yelp' in url or 'yelp' in query:
+                                    results['yelp_rating'] = rating
+                                    results['yelp_reviews'] = review_count
+                                elif 'homestars' in url or 'homestars' in query:
+                                    results['homestars_rating'] = rating
+                                    results['homestars_reviews'] = review_count
+                                elif 'bbb.org' in url or 'bbb' in query:
+                                    results['bbb_rating'] = str(rating) if rating else extracted_json.get('rating')
+                            elif markdown:
+                                # Fallback: parse markdown for ratings
+                                rating_match = re.search(r'(\d\.?\d?)\s*(?:star|out of)', markdown, re.IGNORECASE)
+                                review_match = re.search(r'(\d+)\s*review', markdown, re.IGNORECASE)
+                                
+                                if rating_match:
+                                    rating = float(rating_match.group(1))
+                                    review_count = int(review_match.group(1)) if review_match else None
+                                    
+                                    if 'yelp' in url:
+                                        results['yelp_rating'] = rating
+                                        results['yelp_reviews'] = review_count
+                                    elif 'homestars' in url:
+                                        results['homestars_rating'] = rating
+                                        results['homestars_reviews'] = review_count
+                                    elif 'bbb.org' in url:
+                                        results['bbb_rating'] = str(rating)
                 
-                # Small delay between platform requests
-                time.sleep(1)
+                # Small delay between searches
+                time.sleep(2)
                 
             except Exception as e:
-                print(f"  Error scraping {platform}: {e}")
+                print(f"  Error searching for {query}: {e}")
                 continue
         
         return results
-    
-    def _extract_yelp_ratings(self, content: str, business_name: str) -> Dict:
-        """Extract Yelp ratings from markdown content"""
-        result = {}
-        
-        # Look for rating patterns
-        rating_match = re.search(r'(\d\.?\d?)\s*star', content, re.IGNORECASE)
-        if rating_match:
-            result['yelp_rating'] = float(rating_match.group(1))
-        
-        # Look for review count
-        review_match = re.search(r'(\d+)\s*review', content, re.IGNORECASE)
-        if review_match:
-            result['yelp_reviews'] = int(review_match.group(1))
-        
-        return result
-    
-    def _extract_homestars_ratings(self, content: str, business_name: str) -> Dict:
-        """Extract HomeStars ratings from markdown content"""
-        result = {}
-        
-        # HomeStars uses 0-10 scale
-        rating_match = re.search(r'(\d\.?\d?)\s*out\s*of\s*10', content, re.IGNORECASE)
-        if rating_match:
-            result['homestars_rating'] = float(rating_match.group(1))
-        
-        review_match = re.search(r'(\d+)\s*review', content, re.IGNORECASE)
-        if review_match:
-            result['homestars_reviews'] = int(review_match.group(1))
-        
-        return result
-    
-    def _extract_bbb_ratings(self, content: str, business_name: str) -> Dict:
-        """Extract BBB ratings from markdown content"""
-        result = {}
-        
-        # BBB uses letter grades
-        rating_match = re.search(r'BBB\s*Rating[:\s]*([A-F][+-]?)', content, re.IGNORECASE)
-        if rating_match:
-            result['bbb_rating'] = rating_match.group(1)
-        
-        return result
 
 class SupabaseClient:
     """Client for Supabase operations"""
